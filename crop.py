@@ -1,11 +1,11 @@
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def crop_uniform_border(
-    img:Image.Image, color_threshold=20, buffer=2, min_run=2, max_scan_ratio=0.5
+    img: Image.Image, color_threshold=20, buffer=2, min_run=2, max_scan_ratio=0.5
 ):
     """
     裁剪四周接近纯色的边缘，且防止裁掉贴边文字。
@@ -16,7 +16,7 @@ def crop_uniform_border(
         min_run: 连续多少个非背景像素才算"有内容"
         max_scan_ratio: 最多扫描到图片尺寸的多少比例
     """
-    img = img.convert("RGB")   # 统一转 RGB 再处理
+    img = img.convert("RGB")
     arr = np.array(img)
     h, w, _ = arr.shape
 
@@ -38,7 +38,6 @@ def crop_uniform_border(
         mask = (diff >= color_threshold).astype(np.int8)
         if mask.sum() < min_run:
             return False
-        # 向量化找连续 min_run 个 1
         kernel = np.ones(min_run, dtype=np.int8)
         conv = np.convolve(mask, kernel, mode="valid")
         return (conv >= min_run).any()
@@ -75,12 +74,19 @@ def crop_uniform_border(
             break
         right = j - 1
 
+    # 防扫描交叉
+    if top >= bottom or left >= right:
+        return None, None
+
     new_h = bottom - top + 1
     new_w = right - left + 1
 
     if new_h < h * 0.1 or new_w < w * 0.1:
         return None, None
     if (top, bottom, left, right) == (0, h - 1, 0, w - 1):
+        return None, None
+    # 总裁剪量太小，视为无需裁剪
+    if (h - new_h) + (w - new_w) < 4:
         return None, None
 
     cropped = img.crop((left, top, right + 1, bottom + 1))
@@ -121,7 +127,10 @@ def batch_crop(
         return
 
     total = len(files)
-    cropped_cnt = skipped_cnt = failed_cnt = 0
+    cropped_cnt = 0
+    no_crop_cnt = 0
+    skipped_existing_cnt = 0
+    failed_cnt = 0
 
     print(f"[*] 共找到 {total} 张图片，开始处理...\n")
 
@@ -132,12 +141,27 @@ def batch_crop(
 
         if skip_existing and dst.exists():
             print(f"[{idx}/{total}] 跳过 (已存在): {rel}")
-            skipped_cnt += 1
+            skipped_existing_cnt += 1
             continue
 
         try:
             with Image.open(src) as img:
-                original_format = img.format or src.suffix.lstrip(".").upper()
+                img = ImageOps.exif_transpose(img)  # 先按 EXIF 摆正
+                original_format = img.format
+                if not original_format:
+                    ext = src.suffix.lstrip(".").lower()
+                    original_format = {
+                        "jpg": "JPEG",
+                        "jpeg": "JPEG",
+                        "jpe": "JPEG",
+                        "jfif": "JPEG",
+                        "png": "PNG",
+                        "bmp": "BMP",
+                        "tif": "TIFF",
+                        "tiff": "TIFF",
+                        "webp": "WEBP",
+                        "gif": "GIF",
+                    }.get(ext)
                 exif = img.info.get("exif")
                 img_copy = img.copy()
 
@@ -148,7 +172,7 @@ def batch_crop(
             if cropped is None:
                 safe_save(img_copy, dst, original_format, exif)
                 print(f"[{idx}/{total}] 无需裁剪 → {rel}")
-                skipped_cnt += 1
+                no_crop_cnt += 1
             else:
                 safe_save(cropped, dst, original_format, exif)
                 t, b, l, r = margins
@@ -166,7 +190,8 @@ def batch_crop(
     print("\n" + "=" * 50)
     print(
         f"完成！总计: {total} | 已裁剪: {cropped_cnt} | "
-        f"无需裁剪: {skipped_cnt} | 失败: {failed_cnt}"
+        f"无需裁剪: {no_crop_cnt} | 已存在跳过: {skipped_existing_cnt} | "
+        f"失败: {failed_cnt}"
     )
     print(f"输出目录: {output_path.resolve()}")
 
@@ -175,9 +200,9 @@ if __name__ == "__main__":
     batch_crop(
         input_dir="input",
         output_dir="output",
-        color_threshold=20,  # 越小越敏感；有浅色文字可降到 10~15
-        buffer=2,  # 防止切到抗锯齿边缘
-        min_run=2,  # 连续 2 个非背景像素才算有内容
-        max_scan_ratio=0.5,  # 最多扫描一半
-        skip_existing=True,  # 断点续跑
+        color_threshold=20,
+        buffer=2,
+        min_run=2,
+        max_scan_ratio=0.5,
+        skip_existing=True,
     )
