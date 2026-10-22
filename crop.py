@@ -1,24 +1,26 @@
-from PIL import Image
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+from PIL import Image
 
 
 def crop_uniform_border(
-    img,
-    color_threshold=20,
-    edge_ratio_threshold=0.999,  # 提高到 99.9%
-    sample_rows=5,
-    buffer=2,  # 停止后再回退的像素缓冲
-    min_content_pixels=1,
-):  # 一行/列中非背景像素的最少个数
+    img:Image.Image, color_threshold=20, buffer=2, min_run=2, max_scan_ratio=0.5
+):
     """
-    裁剪四周接近纯色的边缘。
-    关键：只要一行/列中存在 >= min_content_pixels 个明显非背景像素，即视为有内容，停止裁剪。
+    裁剪四周接近纯色的边缘，且防止裁掉贴边文字。
+
+    参数:
+        color_threshold: 像素与背景色的差异阈值（越小越敏感）
+        buffer: 检测到内容后回退的像素数（避免切到抗锯齿边缘）
+        min_run: 连续多少个非背景像素才算"有内容"
+        max_scan_ratio: 最多扫描到图片尺寸的多少比例
     """
-    arr = np.array(img.convert("RGB"))
+    img = img.convert("RGB")   # 统一转 RGB 再处理
+    arr = np.array(img)
     h, w, _ = arr.shape
 
-    # ---- 用 4 个角的小块中位数作为背景参考色（避开边缘文字） ----
+    # 用四角小块的中位数作为背景参考色（避开边缘文字）
     corner_size = max(3, min(h, w) // 50)
     corners = np.concatenate(
         [
@@ -32,52 +34,46 @@ def crop_uniform_border(
     bg_color = np.median(corners, axis=0)
 
     def line_has_content(line):
-        """该行/列是否存在明显非背景像素"""
         diff = np.abs(line.astype(int) - bg_color.astype(int)).max(axis=-1)
-        content_mask = diff >= color_threshold
-        if content_mask.sum() >= min_content_pixels:
-            # 允许少量孤立的边缘抗锯齿噪点：要求连续或数量较多
-            # 简单策略：非背景像素总数超过 min_content_pixels 即算有内容
-            return True
-        return False
-
-    def is_pure_border(line):
-        """该行/列是否可视为纯色边缘（无内容）"""
-        return not line_has_content(line)
+        mask = (diff >= color_threshold).astype(np.int8)
+        if mask.sum() < min_run:
+            return False
+        # 向量化找连续 min_run 个 1
+        kernel = np.ones(min_run, dtype=np.int8)
+        conv = np.convolve(mask, kernel, mode="valid")
+        return (conv >= min_run).any()
 
     top, bottom, left, right = 0, h - 1, 0, w - 1
+    max_scan_h = int(h * max_scan_ratio)
+    max_scan_w = int(w * max_scan_ratio)
 
-    # 顶部向下扫描
-    for i in range(h // 2):
-        if is_pure_border(arr[i]):
-            top = i + 1
-        else:
-            top = max(0, i - buffer)  # 回退缓冲，避免切到内容
+    # 顶部
+    for i in range(max_scan_h):
+        if line_has_content(arr[i]):
+            top = max(0, i - buffer)
             break
+        top = i + 1
 
-    # 底部向上扫描
-    for i in range(h - 1, h // 2, -1):
-        if is_pure_border(arr[i]):
-            bottom = i - 1
-        else:
+    # 底部
+    for i in range(h - 1, h - 1 - max_scan_h, -1):
+        if line_has_content(arr[i]):
             bottom = min(h - 1, i + buffer)
             break
+        bottom = i - 1
 
-    # 左侧向右扫描
-    for j in range(w // 2):
-        if is_pure_border(arr[:, j]):
-            left = j + 1
-        else:
+    # 左侧
+    for j in range(max_scan_w):
+        if line_has_content(arr[:, j]):
             left = max(0, j - buffer)
             break
+        left = j + 1
 
-    # 右侧向左扫描
-    for j in range(w - 1, w // 2, -1):
-        if is_pure_border(arr[:, j]):
-            right = j - 1
-        else:
+    # 右侧
+    for j in range(w - 1, w - 1 - max_scan_w, -1):
+        if line_has_content(arr[:, j]):
             right = min(w - 1, j + buffer)
             break
+        right = j - 1
 
     new_h = bottom - top + 1
     new_w = right - left + 1
@@ -92,13 +88,11 @@ def crop_uniform_border(
 
 
 def safe_save(img, dst, original_format, exif):
-    """安全保存：exif 为 None 时不传该参数，避免 len(None) 崩溃"""
     save_kwargs = {}
     if original_format:
         save_kwargs["format"] = original_format
-    if exif:  # 只有非 None 且非空才传
+    if exif:
         save_kwargs["exif"] = exif
-    # 若是 JPEG 且带 alpha，需转 RGB 避免保存失败
     if original_format == "JPEG" and img.mode in ("RGBA", "LA", "P"):
         img = img.convert("RGB")
     img.save(dst, **save_kwargs)
@@ -107,11 +101,12 @@ def safe_save(img, dst, original_format, exif):
 def batch_crop(
     input_dir,
     output_dir,
-    color_threshold=30,
-    edge_ratio_threshold=0.95,
-    sample_rows=5,
+    color_threshold=20,
+    buffer=2,
+    min_run=2,
+    max_scan_ratio=0.5,
     exts=(".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"),
-    skip_existing=False,
+    skip_existing=True,
 ):
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -143,11 +138,11 @@ def batch_crop(
         try:
             with Image.open(src) as img:
                 original_format = img.format or src.suffix.lstrip(".").upper()
-                exif = img.info.get("exif")  # 可能是 None
-                img_copy = img.copy()  # 脱离 with 后再用更安全
+                exif = img.info.get("exif")
+                img_copy = img.copy()
 
             cropped, margins = crop_uniform_border(
-                img_copy, color_threshold, edge_ratio_threshold, sample_rows
+                img_copy, color_threshold, buffer, min_run, max_scan_ratio
             )
 
             if cropped is None:
@@ -180,8 +175,9 @@ if __name__ == "__main__":
     batch_crop(
         input_dir="input",
         output_dir="output",
-        color_threshold=30,
-        edge_ratio_threshold=0.95,
-        sample_rows=5,
-        skip_existing=True,
+        color_threshold=20,  # 越小越敏感；有浅色文字可降到 10~15
+        buffer=2,  # 防止切到抗锯齿边缘
+        min_run=2,  # 连续 2 个非背景像素才算有内容
+        max_scan_ratio=0.5,  # 最多扫描一半
+        skip_existing=True,  # 断点续跑
     )
