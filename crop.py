@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import shutil
 import sys
@@ -271,8 +269,9 @@ def batch_crop(
                     shutil.copy2(src, dst)  # byte-identical, metadata preserved
 
             if verbose:
-                if result.was_cropped:
-                    t, b, l, r = result.margins
+                margins = result.margins
+                if margins is not None:
+                    t, b, l, r = margins
                     print(
                         f"{prefix} cropped -> {rel} "
                         f"(t{t} b{b} l{l} r{r}) "
