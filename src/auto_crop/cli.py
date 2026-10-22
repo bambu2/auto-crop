@@ -303,7 +303,7 @@ def batch_crop(
     return {"total": total, **counts}
 
 
-def _cli() -> None:
+def main() -> None:
     p = argparse.ArgumentParser(description="Batch-crop uniform image borders.")
     p.add_argument("input_dir", nargs="?", default="input")
     p.add_argument("output_dir", nargs="?", default="output")
@@ -351,4 +351,4 @@ def _cli() -> None:
 
 
 if __name__ == "__main__":
-    _cli()
+    main()
